@@ -1,0 +1,22 @@
+# Voxtype config (symlinked to ~/.config/voxtype/config.toml by install.sh).
+# Unlisted options use Voxtype's defaults; see its docs/CONFIGURATION.md.
+
+engine = "parakeet"
+
+[parakeet]
+model = "parakeet-tdt-0.6b-v2"
+on_demand_loading = false
+
+# Hyprland's SUPER+D bind runs `voxtype record toggle`, so the built-in
+# evdev hotkey stays off.
+[hotkey]
+enabled = false
+
+[output]
+mode = "type"
+
+# Light cleanup through the local Gemma 4 E2B server. If the script fails
+# or times out, Voxtype types the raw transcript instead.
+[output.post_process]
+command = "~/Projects/playground/dictation/bin/cleanup"
+timeout_ms = 8000

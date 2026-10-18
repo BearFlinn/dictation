@@ -1,0 +1,81 @@
+#!/usr/bin/env bash
+# On-demand control for the dictation stack. Runs the Gemma cleanup server and
+# the Voxtype daemon as transient systemd user units, so nothing starts at
+# login and `dictation stop` frees all GPU memory.
+set -euo pipefail
+
+REPO="$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")/.." && pwd)"
+source "$REPO/versions.env"
+
+PORT="${DICTATION_LLM_PORT:-8090}"
+LLM_UNIT=dictation-llm
+VOX_UNIT=dictation-voxtype
+LLAMA_DIR="$REPO/vendor/llama.cpp-$LLAMA_CPP_BUILD"
+
+notify() {
+    if command -v notify-send >/dev/null; then
+        notify-send -a dictation "Dictation" "$1" || true
+    fi
+}
+
+is_active() { systemctl --user is-active --quiet "$1"; }
+
+start() {
+    if ! is_active "$LLM_UNIT"; then
+        systemctl --user reset-failed "$LLM_UNIT" 2>/dev/null || true
+        systemd-run --user --quiet --unit="$LLM_UNIT" --collect \
+            --setenv=LD_LIBRARY_PATH="$LLAMA_DIR" \
+            "$LLAMA_DIR/llama-server" \
+            --model "$REPO/models/$GEMMA_FILE" \
+            --host 127.0.0.1 --port "$PORT" \
+            --n-gpu-layers 999 --ctx-size 4096 --parallel 1 \
+            --reasoning-budget 0
+    fi
+    if ! is_active "$VOX_UNIT"; then
+        systemctl --user reset-failed "$VOX_UNIT" 2>/dev/null || true
+        systemd-run --user --quiet --unit="$VOX_UNIT" --collect \
+            --setenv=WAYLAND_DISPLAY --setenv=XDG_RUNTIME_DIR \
+            --setenv=HYPRLAND_INSTANCE_SIGNATURE --setenv=DBUS_SESSION_BUS_ADDRESS \
+            --setenv=PATH \
+            voxtype daemon
+    fi
+
+    printf 'Waiting for the cleanup model'
+    for _ in $(seq 60); do
+        if curl -fs "http://127.0.0.1:$PORT/health" >/dev/null 2>&1; then
+            echo " ready."
+            echo "Press SUPER+D to start dictating, press again to stop."
+            notify "Ready: SUPER+D toggles dictation"
+            return 0
+        fi
+        is_active "$LLM_UNIT" || break
+        printf '.'
+        sleep 1
+    done
+    echo " failed. Check: dictation logs" >&2
+    notify "Cleanup model failed to start; dictation will type raw text"
+    return 1
+}
+
+stop() {
+    systemctl --user stop "$VOX_UNIT" "$LLM_UNIT" 2>/dev/null || true
+    echo "Dictation stopped."
+}
+
+status() {
+    local u
+    for u in "$LLM_UNIT" "$VOX_UNIT"; do
+        printf '%-18s %s\n' "$u" "$(systemctl --user is-active "$u" 2>/dev/null || true)"
+    done
+}
+
+logs() { journalctl --user -u "$LLM_UNIT" -u "$VOX_UNIT" -n 50 --no-pager "$@"; }
+
+case "${1:-}" in
+    start) start ;;
+    stop) stop ;;
+    restart) stop; start ;;
+    status) status ;;
+    logs) shift; logs "$@" ;;
+    *) echo "usage: dictation {start|stop|restart|status|logs [-f]}" >&2; exit 2 ;;
+esac
