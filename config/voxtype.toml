@@ -1,11 +1,10 @@
 # Voxtype config (symlinked to ~/.config/voxtype/config.toml by install.sh).
 # Unlisted options use Voxtype's defaults; see its docs/CONFIGURATION.md.
 
-engine = "parakeet"
+engine = "cohere"
 
-[parakeet]
-model = "parakeet-tdt-0.6b-v2"
-on_demand_loading = false
+[cohere]
+model = "cohere-transcribe-fp16"
 
 # Hyprland's SUPER+D bind runs `voxtype record toggle`, so the built-in
 # evdev hotkey stays off.
