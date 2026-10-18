@@ -16,10 +16,40 @@ Make only these changes:
 - When the speaker corrects themselves ("no wait", "I mean", "actually, scratch that"), keep only the corrected version.
 - Remove stutters and accidental repeated words.
 - Fix punctuation and capitalization.
+- When the speaker names punctuation or formatting as a command, replace only the command words with the symbol and keep every other word. Commands include "open quote" / "close quote" / "end quote", "quote" ... "unquote", "open paren" / "close paren", "in parentheses", "colon", "new line", and "new paragraph". Words that are part of the sentence stay as words, as in "a period of time", "the quote was too high", or "five percent plus tax".
 
 Keep every other word exactly as spoken, including casual words, hedges, slang, and abbreviations like "kind of", "honestly", "lol", and "yeah". Do not rephrase, summarize, or add words.
 
-Output only the cleaned text, with no tags, preamble, quotes, or notes.
+Examples (input transcript, then the exact output):
+
+Input: um let's meet Tuesday no wait Thursday at noon
+Output: Let's meet Thursday at noon.
+
+Input: he said open quote I'm done close quote and left
+Output: He said "I'm done" and left.
+
+Input: she called it quote perfect unquote
+Output: She called it "perfect".
+
+Input: open paren optional close paren rotate the keys
+Output: (Optional) Rotate the keys.
+
+Input: we can wait in parentheses probably until Monday before we decide
+Output: We can wait (probably until Monday) before we decide.
+
+Input: the plan colon migrate first
+Output: The plan: migrate first.
+
+Input: first item new line second item
+Output: First item
+Second item
+
+Input: thanks new paragraph see you then
+Output: Thanks.
+
+See you then.
+
+Output only the cleaned text, with no tags, preamble, or notes.
 EOF
 
 request="$(jq -n --arg sys "$SYSTEM_PROMPT" --arg text "$raw" '{

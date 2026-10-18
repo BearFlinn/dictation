@@ -5,7 +5,7 @@ Local, on-demand voice dictation for Hyprland. Press a key, speak, press it agai
 ## How it works
 
 - **[Voxtype](https://github.com/peteonrails/voxtype)** records from the mic and transcribes with **Parakeet TDT 0.6B v2** (English, includes punctuation). Parakeet runs on the CPU, because Voxtype's ONNX GPU builds require AVX-512 and the Ryzen 5800X lacks it. Voxtype types the result with `wtype`.
-- Before typing, Voxtype pipes the transcript through `bin/cleanup`. That script sends it to **Gemma 4 E2B** (Q8_0 GGUF) served by **llama.cpp** on `127.0.0.1:8090` for light cleanup: it drops filler words, keeps only the corrected version of self-corrections, and fixes punctuation. It does no rewording.
+- Before typing, Voxtype pipes the transcript through `bin/cleanup`. That script sends it to **Gemma 4 E2B** (Q8_0 GGUF) served by **llama.cpp** on `127.0.0.1:8090` for light cleanup: it drops filler words, keeps only the corrected version of self-corrections, and fixes punctuation. It does no rewording. It also turns dictated formatting into symbols: "open quote … close quote" or "quote … unquote", "open paren … close paren" or "in parentheses …", "colon", "new line", and "new paragraph". Line breaks are typed as Shift+Enter, so chat apps don't submit mid-dictation.
 - If the cleanup server is down, slow (over 7 s), or returns something that looks like a rewrite or an answer instead of a cleanup, Voxtype types the raw transcript.
 - `bin/dictation` runs both processes as transient systemd user units (`dictation-llm`, `dictation-voxtype`). Nothing auto-starts, and `dictation stop` frees everything. Gemma uses about 6 GB of VRAM.
 
