@@ -14,6 +14,8 @@ enabled = false
 
 [output]
 mode = "type"
+# Dictated "new line" becomes Shift+Enter so chat apps don't submit mid-dictation.
+shift_enter_newlines = true
 
 # Light cleanup through the local Gemma 4 E2B server. If the script fails
 # or times out, Voxtype types the raw transcript instead.
