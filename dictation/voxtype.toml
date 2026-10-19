@@ -19,5 +19,5 @@ shift_enter_newlines = true
 # Light cleanup through the local Gemma 4 E2B server. If the script fails
 # or times out, Voxtype types the raw transcript instead.
 [output.post_process]
-command = "~/Projects/playground/dictation/bin/cleanup"
+command = "~/Projects/playground/speech-playground/dictation/cleanup"
 timeout_ms = 8000
