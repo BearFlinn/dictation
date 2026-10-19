@@ -1,10 +1,10 @@
 #!/usr/bin/env bash
 # Voxtype post-process hook: reads a raw transcript on stdin, prints a lightly
-# cleaned version from the local Gemma 4 E2B server. Exits non-zero on any
+# cleaned version from the speech-llm server (Gemma). Exits non-zero on any
 # problem so Voxtype falls back to typing the raw transcript.
 set -euo pipefail
+source "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")/../lib/common.sh"
 
-PORT="${DICTATION_LLM_PORT:-8090}"
 raw="$(cat)"
 [[ -n "${raw//[[:space:]]/}" ]] || exit 1
 
@@ -62,7 +62,7 @@ request="$(jq -n --arg sys "$SYSTEM_PROMPT" --arg text "$raw" '{
     chat_template_kwargs: {enable_thinking: false}
 }')"
 
-cleaned="$(curl -fsS --max-time 7 "http://127.0.0.1:$PORT/v1/chat/completions" \
+cleaned="$(curl -fsS --max-time 7 "$LLM_URL/v1/chat/completions" \
     -H 'Content-Type: application/json' -d "$request" |
     jq -er '.choices[0].message.content')"
 

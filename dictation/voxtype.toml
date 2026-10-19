@@ -1,10 +1,15 @@
 # Voxtype config (symlinked to ~/.config/voxtype/config.toml by install.sh).
 # Unlisted options use Voxtype's defaults; see its docs/CONFIGURATION.md.
 
-engine = "cohere"
+# Voxtype records and types; Cohere runs in the speech-asr server, reached
+# through Voxtype's OpenAI-compatible remote backend. The port matches
+# ASR_PORT in lib/common.sh.
+engine = "whisper"
 
-[cohere]
-model = "cohere-transcribe-fp16"
+[whisper]
+mode = "remote"
+remote_endpoint = "http://127.0.0.1:8091"
+language = "en"
 
 # Hyprland's SUPER+D bind runs `voxtype record toggle`, so the built-in
 # evdev hotkey stays off.
@@ -16,8 +21,8 @@ mode = "type"
 # Dictated "new line" becomes Shift+Enter so chat apps don't submit mid-dictation.
 shift_enter_newlines = true
 
-# Light cleanup through the local Gemma 4 E2B server. If the script fails
-# or times out, Voxtype types the raw transcript instead.
+# Light cleanup through the speech-llm server (Gemma). If the script fails or
+# times out, Voxtype types the raw transcript instead.
 [output.post_process]
 command = "~/Projects/playground/speech-playground/dictation/cleanup"
 timeout_ms = 8000

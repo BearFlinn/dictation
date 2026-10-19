@@ -1,11 +1,12 @@
-"""Merge the mic and chat transcripts (nemo-speech JSON) into one Markdown transcript.
+"""Merge the mic and chat transcripts into one Markdown transcript.
 
 Usage: merge.py MIC_JSON CHAT_JSON > transcript.md
 
-Words from the mic track are "You". Words from the chat track carry a speaker
-number from diarization. Each track is first grouped into turns, so overlapping
-speech from the two tracks doesn't interleave word by word, then the turns are
-sorted by start time.
+Both files are speech-asr responses: the mic track as verbose_json, the chat
+track as diarized_json. Mic segments are "You". Chat speakers are renumbered
+"Speaker 1", "Speaker 2", ... in order of first appearance. Consecutive
+segments from the same speaker with a short gap become one turn, then the
+turns from both tracks are sorted by start time.
 """
 
 import json
@@ -15,17 +16,20 @@ import sys
 TURN_GAP_S = 2.0
 
 
-def turns(path, label):
+def segments(path):
     with open(path, encoding="utf-8") as f:
-        words = json.load(f).get("words", [])
+        return [s for s in json.load(f).get("segments", []) if s.get("text", "").strip()]
+
+
+def turns(segs, label):
     out = []
-    for w in words:
-        speaker = label(w)
-        if out and out[-1]["speaker"] == speaker and w["start"] - out[-1]["end"] < TURN_GAP_S:
-            out[-1]["words"].append(w["word"])
-            out[-1]["end"] = w["end"]
+    for s in segs:
+        speaker = label(s)
+        if out and out[-1]["speaker"] == speaker and s["start"] - out[-1]["end"] < TURN_GAP_S:
+            out[-1]["text"] += " " + s["text"].strip()
+            out[-1]["end"] = s["end"]
         else:
-            out.append({"speaker": speaker, "start": w["start"], "end": w["end"], "words": [w["word"]]})
+            out.append({"speaker": speaker, "start": s["start"], "end": s["end"], "text": s["text"].strip()})
     return out
 
 
@@ -37,15 +41,22 @@ def stamp(seconds):
 
 def main():
     mic_path, chat_path = sys.argv[1:3]
+    numbers = {}
+
+    def chat_label(seg):
+        raw = seg.get("speaker", "?")
+        numbers.setdefault(raw, len(numbers) + 1)
+        return f"Speaker {numbers[raw]}"
+
     merged = sorted(
-        turns(mic_path, lambda w: "You") + turns(chat_path, lambda w: f"Speaker {w.get('speaker', '?')}"),
+        turns(segments(mic_path), lambda s: "You") + turns(segments(chat_path), chat_label),
         key=lambda t: t["start"],
     )
     if not merged:
         print("_No speech detected._")
         return
     for t in merged:
-        print(f"**[{stamp(t['start'])}] {t['speaker']}:** {' '.join(t['words'])}\n")
+        print(f"**[{stamp(t['start'])}] {t['speaker']}:** {t['text']}\n")
 
 
 if __name__ == "__main__":
