@@ -1,0 +1,187 @@
+#!/usr/bin/env bash
+# On-demand meeting notes. `meeting start` records your mic and the GoXLR Chat
+# channel as two tracks; `meeting stop` transcribes them (speakers are separated
+# on the Chat track only, so your lines are always labeled "You"), merges them
+# into one transcript and adds a Gemma summary. Everything runs as transient
+# systemd user units, so nothing stays loaded between meetings.
+set -euo pipefail
+
+REPO="$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")/.." && pwd)"
+source "$REPO/versions.env"
+
+NEMO="$REPO/vendor/nemo-speech-$NEMO_SPEECH_VERSION/bin/nemo-speech"
+LLAMA_DIR="$REPO/vendor/llama.cpp-$LLAMA_CPP_BUILD"
+OUT_ROOT="${MEETINGS_DIR:-$HOME/Documents/meetings}"
+PORT="${MEETING_LLM_PORT:-8091}"
+MIC_SOURCE="${MEETING_MIC_SOURCE:-alsa_input.usb-TC-Helicon_GoXLR-00.HiFi__Headset__source}"
+CHAT_SOURCE="${MEETING_CHAT_SOURCE:-alsa_output.usb-TC-Helicon_GoXLR-00.HiFi__Headphones__sink.monitor}"
+
+REC_UNIT=meeting-record
+LLM_UNIT=meeting-llm
+STATE_DIR="$XDG_RUNTIME_DIR/meeting"
+CURRENT="$STATE_DIR/current"
+
+notify() {
+    if command -v notify-send >/dev/null; then
+        notify-send -a meeting "Meeting notes" "$1" || true
+    fi
+}
+
+is_active() { systemctl --user is-active --quiet "$1"; }
+
+processing() {
+    [[ -n "$(systemctl --user list-units --quiet --state=active --plain 'meeting-process-*' 2>/dev/null)" ]]
+}
+
+start() {
+    if is_active "$REC_UNIT"; then
+        echo "Already recording to $(cat "$CURRENT")."
+        return 0
+    fi
+    local dir
+    dir="$OUT_ROOT/$(date +%F_%H%M%S)"
+    mkdir -p "$dir" "$STATE_DIR"
+    echo "$dir" >"$CURRENT"
+    systemctl --user reset-failed "$REC_UNIT" 2>/dev/null || true
+    # One ffmpeg process records both sources so the tracks share a start time.
+    # SIGINT lets ffmpeg finish the WAV headers on stop.
+    systemd-run --user --quiet --unit="$REC_UNIT" --collect \
+        --property=KillSignal=SIGINT \
+        --setenv=XDG_RUNTIME_DIR \
+        ffmpeg -nostdin -loglevel error \
+        -f pulse -i "$MIC_SOURCE" -f pulse -i "$CHAT_SOURCE" \
+        -map 0:a -ac 1 -ar 16000 "$dir/mic.wav" \
+        -map 1:a -ac 1 -ar 16000 "$dir/chat.wav"
+    echo "Recording to $dir"
+    notify "Recording"
+}
+
+stop() {
+    if ! is_active "$REC_UNIT"; then
+        echo "Not recording."
+        return 0
+    fi
+    local dir
+    dir="$(cat "$CURRENT")"
+    systemctl --user stop "$REC_UNIT"
+    rm -f "$CURRENT"
+    systemd-run --user --quiet --unit="meeting-process-$(basename "$dir")" --collect \
+        --setenv=XDG_RUNTIME_DIR --setenv=DBUS_SESSION_BUS_ADDRESS --setenv=PATH \
+        "$REPO/meetings/meeting" process "$dir"
+    echo "Stopped. Transcribing in the background; notes will be in $dir/notes.md"
+    notify "Stopped, transcribing…"
+}
+
+toggle() {
+    if is_active "$REC_UNIT"; then stop; else start; fi
+}
+
+transcribe() { # dir
+    local dir="$1"
+    "$NEMO" transcribe "$dir/mic.wav" -f json >"$dir/mic.json"
+    "$NEMO" transcribe "$dir/chat.wav" --diar-model nemotron-3-diarization -f json >"$dir/chat.json"
+    python3 -I "$REPO/meetings/merge.py" "$dir/mic.json" "$dir/chat.json" >"$dir/transcript.md"
+}
+
+summarize() { # transcript.md -> summary on stdout
+    if ! is_active "$LLM_UNIT"; then
+        systemctl --user reset-failed "$LLM_UNIT" 2>/dev/null || true
+        systemd-run --user --quiet --unit="$LLM_UNIT" --collect \
+            --setenv=LD_LIBRARY_PATH="$LLAMA_DIR" \
+            "$LLAMA_DIR/llama-server" \
+            --model "$REPO/models/$SUMMARY_GEMMA_FILE" \
+            --host 127.0.0.1 --port "$PORT" \
+            --n-gpu-layers 999 --ctx-size 32768 --parallel 1 \
+            --reasoning-budget 0
+    fi
+    local ok=
+    for _ in $(seq 120); do
+        if curl -fs "http://127.0.0.1:$PORT/health" >/dev/null 2>&1; then ok=1; break; fi
+        is_active "$LLM_UNIT" || break
+        sleep 1
+    done
+    if [[ -z "$ok" ]]; then
+        echo "meeting: summary model failed to start" >&2
+        return 1
+    fi
+
+    local system
+    system='You write notes for a recorded meeting. The transcript labels the user "You"; other participants are "Speaker 1", "Speaker 2" and so on. Keep those labels and never guess real names. The transcript comes from speech recognition, so expect some misheard words. Use only what the transcript says.
+
+Reply in Markdown with exactly these sections:
+## Summary
+3 to 6 bullets covering what was discussed.
+## Decisions
+Bullets, or "None recorded."
+## Action items
+Bullets as "- [ ] Owner: task", or "None recorded."'
+    jq -n --arg sys "$system" --rawfile t "$1" '{
+            messages: [{role: "system", content: $sys},
+                       {role: "user", content: ("<transcript>\n" + $t + "</transcript>")}],
+            temperature: 0.2, max_tokens: 2048,
+            chat_template_kwargs: {enable_thinking: false}
+        }' |
+        curl -fs --max-time 600 "http://127.0.0.1:$PORT/v1/chat/completions" \
+            -H 'Content-Type: application/json' -d @- |
+        jq -r '.choices[0].message.content'
+}
+
+process() { # dir
+    local dir="${1:?usage: meeting process DIR}"
+    dir="$(cd "$dir" && pwd)"
+    mkdir -p "$STATE_DIR"
+    # One meeting at a time, so two runs never share the summary server.
+    exec 9>"$STATE_DIR/process.lock"
+    flock 9
+
+    transcribe "$dir"
+    local summary=""
+    summary="$(summarize "$dir/transcript.md")" || summary="_Summary failed; see \`journalctl --user -u $LLM_UNIT\`._"
+    systemctl --user stop "$LLM_UNIT" 2>/dev/null || true
+
+    {
+        echo "# Meeting $(basename "$dir")"
+        echo
+        echo "$summary"
+        echo
+        echo "## Transcript"
+        echo
+        cat "$dir/transcript.md"
+    } >"$dir/notes.md"
+    echo "Notes written to $dir/notes.md"
+    notify "Notes ready: $dir/notes.md"
+}
+
+# Waybar custom module: prints one JSON status line every second.
+waybar_status() {
+    local state icon tooltip text
+    while true; do
+        if is_active "$REC_UNIT" && [[ -f "$CURRENT" ]]; then
+            local secs=$(( $(date +%s) - $(stat -c %Y "$CURRENT") ))
+            state=recording icon="󰑋"
+            text="$icon $(printf '%d:%02d' $((secs / 60)) $((secs % 60)))"
+            tooltip="Recording meeting (click to stop)"
+        elif processing; then
+            state=processing icon="󰔟" text="$icon" tooltip="Transcribing meeting…"
+        else
+            state=off icon="󰡉" text="$icon" tooltip="Meeting notes (click to record)"
+        fi
+        jq -cn --arg t "$text" --arg c "$state" --arg tt "$tooltip" \
+            '{text: $t, alt: $c, class: $c, tooltip: $tt}'
+        sleep 1
+    done
+}
+
+case "${1:-}" in
+    start) start ;;
+    stop) stop ;;
+    toggle) toggle ;;
+    process) shift; process "$@" ;;
+    status)
+        if is_active "$REC_UNIT"; then echo "recording to $(cat "$CURRENT")"
+        elif processing; then echo "transcribing"
+        else echo "idle"; fi ;;
+    logs) shift; journalctl --user -u "$REC_UNIT" -u "$LLM_UNIT" -u 'meeting-process-*' -n 50 --no-pager "$@" ;;
+    waybar) waybar_status ;;
+    *) echo "usage: meeting {start|stop|toggle|status|process DIR|logs [-f]|waybar}" >&2; exit 2 ;;
+esac

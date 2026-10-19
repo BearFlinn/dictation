@@ -1,7 +1,9 @@
 #!/usr/bin/env bash
-# Installs the speech tools: Voxtype (.deb), a llama.cpp CUDA build, the CUDA
-# 13 libraries Voxtype's GPU path needs, Gemma 4 E2B (GGUF), Cohere Transcribe
-# (ONNX), config symlinks and the Hyprland bind. Safe to re-run; finished
+# Installs the speech tools. Dictation: Voxtype (.deb), the CUDA 13 libraries
+# Voxtype's GPU path needs, Cohere Transcribe (ONNX), Gemma 4 E2B and the
+# Hyprland bind. Meeting notes: NeMo-Speech.cpp with its Nemotron ASR and
+# diarization models, and Gemma 4 E4B. Both share one llama.cpp CUDA build.
+# Also links the CLIs and writes app-menu entries. Safe to re-run; finished
 # steps are skipped.
 set -euo pipefail
 
@@ -90,10 +92,34 @@ install_cuda_libs() {
     touch "$dir/.complete"
 }
 
+install_nemo_speech() {
+    local dir="$VENDOR/nemo-speech-$NEMO_SPEECH_VERSION"
+    if [[ -x "$dir/bin/nemo-speech" ]]; then
+        log "NeMo-Speech.cpp $NEMO_SPEECH_VERSION already present"
+    else
+        log "Downloading NeMo-Speech.cpp $NEMO_SPEECH_VERSION (CUDA)"
+        local tmp name
+        tmp="$(mktemp -d)"
+        name="nemo-speech-$NEMO_SPEECH_VERSION-linux-x86_64-cuda"
+        fetch "https://github.com/NVIDIA/NeMo-Speech.cpp/releases/download/v$NEMO_SPEECH_VERSION/$name.tar.gz" "$tmp/ns.tar.gz"
+        echo "$NEMO_SPEECH_SHA256  $tmp/ns.tar.gz" | sha256sum -c --quiet -
+        mkdir -p "$dir"
+        tar -xzf "$tmp/ns.tar.gz" -C "$dir" --strip-components=1
+        rm -rf "$tmp"
+    fi
+    # Models go to ~/.cache/nemo-speech; `pull` checks their size and SHA-256.
+    log "Pulling Nemotron ASR and diarization models"
+    "$dir/bin/nemo-speech" pull nemotron-3.5
+    "$dir/bin/nemo-speech" pull nemotron-3-diarization
+}
+
 install_models() {
     log "Downloading Gemma 4 E2B ($GEMMA_FILE)"
     mkdir -p "$MODELS"
     fetch "https://huggingface.co/$GEMMA_REPO/resolve/$GEMMA_REVISION/$GEMMA_FILE" "$MODELS/$GEMMA_FILE"
+
+    log "Downloading Gemma 4 E4B ($SUMMARY_GEMMA_FILE)"
+    fetch "https://huggingface.co/$SUMMARY_GEMMA_REPO/resolve/$SUMMARY_GEMMA_REVISION/$SUMMARY_GEMMA_FILE" "$MODELS/$SUMMARY_GEMMA_FILE"
 
     # File names follow Voxtype's own downloader (src/setup/model.rs), which
     # renames the fp16 graphs to the names its Cohere engine loads.
@@ -122,8 +148,9 @@ link_config() {
     mkdir -p "$HOME/.config/voxtype" "$HOME/.local/bin"
     ln -sfn "$REPO/dictation/voxtype.toml" "$HOME/.config/voxtype/config.toml"
     ln -sfn "$REPO/dictation/dictation" "$HOME/.local/bin/dictation"
+    ln -sfn "$REPO/meetings/meeting" "$HOME/.local/bin/meeting"
 
-    log "Writing app-menu entry"
+    log "Writing app-menu entries"
     mkdir -p "$HOME/.local/share/applications"
     cat >"$HOME/.local/share/applications/dictation.desktop" <<EOF
 [Desktop Entry]
@@ -136,6 +163,18 @@ Icon=audio-input-microphone
 Terminal=false
 Categories=Utility;Accessibility;
 Keywords=voice;speech;dictate;transcribe;microphone;
+EOF
+    cat >"$HOME/.local/share/applications/meeting-notes.desktop" <<EOF
+[Desktop Entry]
+Type=Application
+Name=Meeting Notes
+GenericName=Meeting recorder
+Comment=Start or stop recording a call; notes are written when it stops
+Exec=$REPO/meetings/meeting toggle
+Icon=audio-x-generic
+Terminal=false
+Categories=Utility;Office;
+Keywords=meeting;call;record;transcribe;notes;diarization;
 EOF
 }
 
@@ -155,7 +194,8 @@ EOF
 install_voxtype
 install_llama
 install_cuda_libs
+install_nemo_speech
 install_models
 link_config
 add_hypr_bind
-log "Done. Run 'dictation start', then press SUPER+D to start and stop dictating."
+log "Done. Dictation: run 'dictation start', then press SUPER+D. Meetings: run 'meeting toggle'."
