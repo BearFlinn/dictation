@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
-# Installs the dictation stack: Voxtype (.deb), a llama.cpp CUDA build, the
-# CUDA 13 libraries Voxtype's GPU path needs, Gemma 4 E2B (GGUF), Cohere
-# Transcribe (ONNX), config symlinks and the Hyprland bind. Safe to re-run;
-# finished steps are skipped.
+# Installs the speech tools: Voxtype (.deb), a llama.cpp CUDA build, the CUDA
+# 13 libraries Voxtype's GPU path needs, Gemma 4 E2B (GGUF), Cohere Transcribe
+# (ONNX), config symlinks and the Hyprland bind. Safe to re-run; finished
+# steps are skipped.
 set -euo pipefail
 
 REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -120,8 +120,8 @@ install_models() {
 link_config() {
     log "Linking config and CLI"
     mkdir -p "$HOME/.config/voxtype" "$HOME/.local/bin"
-    ln -sfn "$REPO/config/voxtype.toml" "$HOME/.config/voxtype/config.toml"
-    ln -sfn "$REPO/bin/dictation" "$HOME/.local/bin/dictation"
+    ln -sfn "$REPO/dictation/voxtype.toml" "$HOME/.config/voxtype/config.toml"
+    ln -sfn "$REPO/dictation/dictation" "$HOME/.local/bin/dictation"
 
     log "Writing app-menu entry"
     mkdir -p "$HOME/.local/share/applications"
@@ -131,7 +131,7 @@ Type=Application
 Name=Dictation
 GenericName=Voice dictation
 Comment=Start or stop local voice dictation (SUPER+D records)
-Exec=$REPO/bin/dictation toggle
+Exec=$REPO/dictation/dictation toggle
 Icon=audio-input-microphone
 Terminal=false
 Categories=Utility;Accessibility;
@@ -147,7 +147,7 @@ add_hypr_bind() {
     log "Adding SUPER+D dictation toggle to $HYPR_CONF"
     cat >> "$HYPR_CONF" <<'EOF'
 
-# Dictation: SUPER+D starts/stops recording (needs `dictation start`; see ~/Projects/playground/dictation)
+# Dictation: SUPER+D starts/stops recording (needs `dictation start`; see ~/Projects/playground/speech-playground)
 bind = SUPER, D, exec, voxtype record toggle
 EOF
 }
