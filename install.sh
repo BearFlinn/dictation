@@ -1,10 +1,9 @@
 #!/usr/bin/env bash
-# Installs the speech tools. Dictation: Voxtype (.deb), the CUDA 13 libraries
-# Voxtype's GPU path needs, Cohere Transcribe (ONNX), Gemma 4 E2B and the
-# Hyprland bind. Meeting notes: NeMo-Speech.cpp with its Nemotron ASR and
-# diarization models, and Gemma 4 E4B. Both share one llama.cpp CUDA build.
-# Also links the CLIs and writes app-menu entries. Safe to re-run; finished
-# steps are skipped.
+# Installs the speech stack: CrispASR (speech-asr) with Cohere Transcribe,
+# Nemotron 3 Diarization and Silero VAD; llama.cpp (speech-llm) with Gemma;
+# the CUDA 13 libraries CrispASR needs; Voxtype as the dictation front end;
+# CLI symlinks, app-menu entries and the Hyprland bind. Safe to re-run;
+# finished steps are skipped.
 set -euo pipefail
 
 REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -12,7 +11,6 @@ source "$REPO/versions.env"
 
 VENDOR="$REPO/vendor"
 MODELS="$REPO/models"
-COHERE_DIR="$HOME/.local/share/voxtype/models/$COHERE_MODEL"
 HYPR_CONF="$HOME/.config/hypr/hyprland.conf"
 
 log() { printf '\n==> %s\n' "$*"; }
@@ -21,6 +19,10 @@ fetch() { # url dest
     [[ -s "$2" ]] && return 0
     curl -fL --retry 3 -o "$2.part" "$1"
     mv "$2.part" "$2"
+}
+
+hf_fetch() { # repo revision file
+    fetch "https://huggingface.co/$1/resolve/$2/$3" "$MODELS/$3"
 }
 
 install_voxtype() {
@@ -44,13 +46,26 @@ install_voxtype() {
         sudo apt-get install -y "$tmp/$deb"
         rm -rf "$tmp"
     fi
-    # `dictation start` runs the ONNX CUDA binary directly. /usr/bin/voxtype
-    # only needs to be an ONNX build so `voxtype record toggle` and config
-    # checks understand the Cohere engine. (`voxtype setup gpu --enable`
-    # refuses on CPUs without AVX-512, but the CUDA binary runs fine on the
-    # Ryzen 5800X.)
-    log "Selecting Voxtype's ONNX binary"
-    sudo voxtype setup onnx --enable
+    # Transcription happens in speech-asr, so Voxtype only needs its default
+    # Whisper build for the remote backend.
+    log "Selecting Voxtype's default (Whisper) binary"
+    sudo voxtype setup onnx --disable
+}
+
+install_crispasr() {
+    local dir="$VENDOR/crispasr-$CRISPASR_VERSION"
+    if [[ -x "$dir/crispasr" ]]; then
+        log "CrispASR $CRISPASR_VERSION already present"
+        return
+    fi
+    log "Downloading CrispASR $CRISPASR_VERSION (CUDA 13)"
+    local tmp
+    tmp="$(mktemp -d)"
+    fetch "https://github.com/CrispStrobe/CrispASR/releases/download/v$CRISPASR_VERSION/crispasr-linux-x86_64-cuda13.tar.gz" "$tmp/crispasr.tar.gz"
+    echo "$CRISPASR_SHA256  $tmp/crispasr.tar.gz" | sha256sum -c --quiet -
+    mkdir -p "$dir"
+    tar -xzf "$tmp/crispasr.tar.gz" -C "$dir" --strip-components=1
+    rm -rf "$tmp"
 }
 
 install_llama() {
@@ -77,7 +92,7 @@ install_cuda_libs() {
         log "CUDA 13 libraries already present"
         return
     fi
-    log "Downloading CUDA 13 runtime, cuBLAS, cuFFT, cuRAND and cuDNN"
+    log "Downloading CUDA 13 runtime and cuBLAS"
     local tmp entry url sha
     tmp="$(mktemp -d)"
     mkdir -p "$dir"
@@ -92,77 +107,37 @@ install_cuda_libs() {
     touch "$dir/.complete"
 }
 
-install_nemo_speech() {
-    local dir="$VENDOR/nemo-speech-$NEMO_SPEECH_VERSION"
-    if [[ -x "$dir/bin/nemo-speech" ]]; then
-        log "NeMo-Speech.cpp $NEMO_SPEECH_VERSION already present"
-    else
-        log "Downloading NeMo-Speech.cpp $NEMO_SPEECH_VERSION (CUDA)"
-        local tmp name
-        tmp="$(mktemp -d)"
-        name="nemo-speech-$NEMO_SPEECH_VERSION-linux-x86_64-cuda"
-        fetch "https://github.com/NVIDIA/NeMo-Speech.cpp/releases/download/v$NEMO_SPEECH_VERSION/$name.tar.gz" "$tmp/ns.tar.gz"
-        echo "$NEMO_SPEECH_SHA256  $tmp/ns.tar.gz" | sha256sum -c --quiet -
-        mkdir -p "$dir"
-        tar -xzf "$tmp/ns.tar.gz" -C "$dir" --strip-components=1
-        rm -rf "$tmp"
-    fi
-    # Models go to ~/.cache/nemo-speech; `pull` checks their size and SHA-256.
-    log "Pulling Nemotron ASR and diarization models"
-    "$dir/bin/nemo-speech" pull nemotron-3.5
-    "$dir/bin/nemo-speech" pull nemotron-3-diarization
-}
-
 install_models() {
-    log "Downloading Gemma 4 E2B ($GEMMA_FILE)"
     mkdir -p "$MODELS"
-    fetch "https://huggingface.co/$GEMMA_REPO/resolve/$GEMMA_REVISION/$GEMMA_FILE" "$MODELS/$GEMMA_FILE"
-
-    log "Downloading Gemma 4 E4B ($SUMMARY_GEMMA_FILE)"
-    fetch "https://huggingface.co/$SUMMARY_GEMMA_REPO/resolve/$SUMMARY_GEMMA_REVISION/$SUMMARY_GEMMA_FILE" "$MODELS/$SUMMARY_GEMMA_FILE"
-
-    # File names follow Voxtype's own downloader (src/setup/model.rs), which
-    # renames the fp16 graphs to the names its Cohere engine loads.
-    log "Downloading Cohere Transcribe ($COHERE_MODEL, ~3.9 GB)"
-    mkdir -p "$COHERE_DIR"
-    local pair src dest
-    for pair in \
-        onnx/encoder_model_fp16.onnx:encoder_model.onnx \
-        onnx/encoder_model_fp16.onnx_data:encoder_model_fp16.onnx_data \
-        onnx/encoder_model_fp16.onnx_data_1:encoder_model_fp16.onnx_data_1 \
-        onnx/decoder_model_merged_fp16.onnx:decoder_model_merged.onnx \
-        onnx/decoder_model_merged_fp16.onnx_data:decoder_model_merged_fp16.onnx_data \
-        tokenizer.json:tokenizer.json \
-        tokenizer_config.json:tokenizer_config.json \
-        config.json:config.json \
-        generation_config.json:generation_config.json \
-        processor_config.json:processor_config.json; do
-        src="${pair%%:*}"
-        dest="${pair##*:}"
-        fetch "https://huggingface.co/$COHERE_REPO/resolve/$COHERE_REVISION/$src" "$COHERE_DIR/$dest"
-    done
+    log "Downloading Cohere Transcribe ($COHERE_FILE, ~4.1 GB)"
+    hf_fetch "$COHERE_REPO" "$COHERE_REVISION" "$COHERE_FILE"
+    log "Downloading Nemotron 3 Diarization ($DIAR_FILE)"
+    hf_fetch "$DIAR_REPO" "$DIAR_REVISION" "$DIAR_FILE"
+    log "Downloading Silero VAD ($VAD_FILE)"
+    hf_fetch "$VAD_REPO" "$VAD_REVISION" "$VAD_FILE"
+    log "Downloading Gemma ($GEMMA_FILE)"
+    hf_fetch "$GEMMA_REPO" "$GEMMA_REVISION" "$GEMMA_FILE"
 }
 
 link_config() {
-    log "Linking config and CLI"
-    mkdir -p "$HOME/.config/voxtype" "$HOME/.local/bin"
+    log "Linking config and CLIs"
+    mkdir -p "$HOME/.config/voxtype" "$HOME/.local/bin" "$HOME/.local/share/applications"
     ln -sfn "$REPO/dictation/voxtype.toml" "$HOME/.config/voxtype/config.toml"
-    ln -sfn "$REPO/dictation/dictation" "$HOME/.local/bin/dictation"
+    ln -sfn "$REPO/bin/speech" "$HOME/.local/bin/speech"
     ln -sfn "$REPO/meetings/meeting" "$HOME/.local/bin/meeting"
 
     log "Writing app-menu entries"
-    mkdir -p "$HOME/.local/share/applications"
-    cat >"$HOME/.local/share/applications/dictation.desktop" <<EOF
+    cat >"$HOME/.local/share/applications/speech.desktop" <<EOF
 [Desktop Entry]
 Type=Application
-Name=Dictation
+Name=Speech
 GenericName=Voice dictation
-Comment=Start or stop local voice dictation (SUPER+D records)
-Exec=$REPO/dictation/dictation toggle
+Comment=Start or stop the local speech servers and dictation (SUPER+D records)
+Exec=$REPO/bin/speech toggle
 Icon=audio-input-microphone
 Terminal=false
 Categories=Utility;Accessibility;
-Keywords=voice;speech;dictate;transcribe;microphone;
+Keywords=voice;speech;dictate;dictation;transcribe;microphone;
 EOF
     cat >"$HOME/.local/share/applications/meeting-notes.desktop" <<EOF
 [Desktop Entry]
@@ -184,18 +159,18 @@ add_hypr_bind() {
         return
     fi
     log "Adding SUPER+D dictation toggle to $HYPR_CONF"
-    cat >> "$HYPR_CONF" <<'EOF'
+    cat >>"$HYPR_CONF" <<'EOF'
 
-# Dictation: SUPER+D starts/stops recording (needs `dictation start`; see ~/Projects/playground/speech-playground)
+# Dictation: SUPER+D starts/stops recording (needs `speech start`; see ~/Projects/playground/speech-playground)
 bind = SUPER, D, exec, voxtype record toggle
 EOF
 }
 
 install_voxtype
+install_crispasr
 install_llama
 install_cuda_libs
-install_nemo_speech
 install_models
 link_config
 add_hypr_bind
-log "Done. Dictation: run 'dictation start', then press SUPER+D. Meetings: run 'meeting toggle'."
+log "Done. Run 'speech start', then press SUPER+D to dictate. Meetings: 'meeting toggle'."
