@@ -3,6 +3,7 @@
 Local, on-demand speech-to-text tools for a Hyprland desktop with an NVIDIA GPU. Nothing leaves the machine and nothing runs until you start it, so the GPU stays free for games.
 
 - **[Dictation](#dictation):** press a key, speak, press it again, and the text is typed into whatever window has focus.
+- **[Meeting notes](#meeting-notes):** record a call, and when it ends get a Markdown file with a summary, action items and a transcript labeled by speaker.
 
 Shared pieces live at the top level: `install.sh` installs everything, `versions.env` pins every download, and `vendor/` and `models/` hold the llama.cpp build and model files.
 
@@ -44,6 +45,48 @@ The Waybar module (in `~/.config/waybar/config.jsonc`, styled in `style.css` and
 - **Transcription engine or model:** `dictation/voxtype.toml`. Smaller Cohere variants (`cohere-transcribe-q4f16`, `-int8`) and other engines are listed in Voxtype's `docs/CONFIGURATION.md`. They aren't downloaded by `install.sh`.
 - **Disable cleanup:** remove the `[output.post_process]` section from `dictation/voxtype.toml`.
 
+## Meeting notes
+
+### How it works
+
+- `meeting start` records two tracks with one `ffmpeg` process: your mic (GoXLR "Chat Mic") as `mic.wav` and everyone else (the monitor of the GoXLR "Chat" output) as `chat.wav`. Recording uses no GPU.
+- `meeting stop` ends the recording and processes it in the background:
+  - **[NeMo-Speech.cpp](https://github.com/NVIDIA/NeMo-Speech.cpp)** transcribes both tracks with **Nemotron 3.5 ASR** on the GPU. Only the chat track goes through **Nemotron 3 Diarization**, which separates up to eight speakers. Your lines are always labeled "You"; others are "Speaker 1", "Speaker 2" and so on, numbered in order of first appearance.
+  - `meetings/merge.py` groups each track into turns and interleaves them by time into `transcript.md`.
+  - **Gemma 4 E4B** (Q8_0, llama.cpp on `127.0.0.1:8091`) writes a summary, decisions and action items. The server starts for the summary and stops right after.
+  - Everything lands in `~/Documents/meetings/<date>_<time>/notes.md`, next to the WAV and JSON files. A notification says when it's ready.
+- Processing an hour of audio takes a couple of minutes. With dictation also running, GPU memory peaks around 15 of 16 GB during the summary; if Gemma can't load, `notes.md` still gets the transcript and says the summary failed.
+
+### Use
+
+- **App menu:** "Meeting Notes" starts recording, or stops it if it's running.
+- **Waybar:** the people icon is grey when idle, red with a timer while recording, and yellow while transcribing. Click it to start or stop.
+
+From a terminal:
+
+```sh
+meeting start | stop | toggle | status
+meeting process ~/Documents/meetings/<dir>   # redo transcript and notes
+meeting logs -f
+```
+
+The Waybar module:
+
+```jsonc
+"custom/meeting": {
+    "exec": "~/.local/bin/meeting waybar",
+    "return-type": "json",
+    "on-click": "~/.local/bin/meeting toggle"
+}
+```
+
+### Tuning
+
+- **Audio sources:** set `MEETING_MIC_SOURCE` and `MEETING_CHAT_SOURCE` to other PipeWire source names (`pactl list short sources`).
+- **Output folder:** `MEETINGS_DIR`.
+- **Summary prompt:** `summarize()` in `meetings/meeting`.
+- **Turn grouping:** `TURN_GAP_S` in `meetings/merge.py`.
+
 ## Install
 
 ```sh
@@ -56,13 +99,14 @@ The installer does the following, and is safe to re-run:
 - Selects Voxtype's ONNX binary.
 - Downloads the llama.cpp CUDA build into `vendor/`.
 - Downloads NVIDIA's CUDA 13 libraries (runtime, cuBLAS, cuFFT, cuRAND, cuDNN) from PyPI into `vendor/cuda13-libs/`, checking their hashes.
-- Downloads Gemma into `models/`.
+- Downloads the NeMo-Speech.cpp CUDA build into `vendor/`, checking its hash, and pulls the Nemotron ASR and diarization models into `~/.cache/nemo-speech/`.
+- Downloads Gemma 4 E2B (dictation cleanup) and E4B (meeting summaries) into `models/`.
 - Downloads Cohere Transcribe into `~/.local/share/voxtype/models/`.
 - Symlinks `dictation/voxtype.toml` to `~/.config/voxtype/config.toml`.
-- Symlinks `dictation/dictation` into `~/.local/bin`.
-- Writes the app-menu entry.
+- Symlinks `dictation/dictation` and `meetings/meeting` into `~/.local/bin`.
+- Writes the "Dictation" and "Meeting Notes" app-menu entries.
 - Appends the SUPER+D bind to `~/.config/hypr/hyprland.conf`.
 
-All versions, model revisions and library hashes are pinned in `versions.env`. The Waybar module is added by hand (see above).
+All versions, model revisions and library hashes are pinned in `versions.env`. The Waybar modules are added by hand (see above).
 
 `voxtype setup gpu --enable` refuses to pick a CUDA build on CPUs without AVX-512. The CUDA build runs fine on the Ryzen 5800X, so `dictation/dictation` starts it directly instead.
